@@ -60,9 +60,20 @@ export default function ChallanView() {
           <span>Saved. Store stock is updated.</span>
           <span className="done-links">
             <Link to="/">Home</Link>
-            {t.kind !== 'issue' && <Link to={workLink('bill', t.customer_id)}>Make bill now</Link>}
+            {t.kind !== 'issue' && t.customer_pcs_out === 0 && (
+              <Link to={workLink('bill', t.customer_id)}>All items are back — make bill now</Link>
+            )}
             <Link to={workLink(KIND_WORK[t.kind])}>{WORK[KIND_WORK[t.kind]].label} again</Link>
           </span>
+        </div>
+      )}
+      {params.get('new') && t.kind !== 'issue' && t.customer_pcs_out > 0 && (
+        <div className="banner no-print">
+          <b>
+            {t.customer_name} still has {t.customer_pcs_out} pcs.
+          </b>{' '}
+          No bill needed yet: one bill will cover everything once all items are back.{' '}
+          <Link to={workLink('bill', t.customer_id)}>Make a separate bill now</Link>
         </div>
       )}
 

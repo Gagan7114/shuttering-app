@@ -8,7 +8,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from .billing import rent_units
-from .models import Customer, Item, ShopSettings
+from .models import Bill, Customer, Item, ShopSettings
 
 
 def at(s):
@@ -107,6 +107,34 @@ class FlowTests(FlowBase):
         self.assertEqual(res.status_code, 201, res.data)
         bill = self.api.get(f"/api/bills/{res.data['id']}").data
         self.assertEqual(bill["total"], 250.0)
+
+    def test_take_return_take_more_return_all_is_one_bill(self):
+        faata = Item.objects.create(name="Faata", total_qty=20, rate=Decimal("2"), basis="day")
+        # Day 0: 5 steel plates + 10 faate
+        self.challan("2026-11-01T10:00", self.give(self.item1, 5), self.give(faata, 10))
+        # Day 2: steel plates come back; faate still out, so no bill is suggested yet
+        ch = self.challan("2026-11-03T10:00", self.back(self.item1, 5))
+        self.assertEqual(self.api.get(f"/api/challans/{ch['id']}").data["customer_pcs_out"], 10)
+        # 3 days later: takes other items
+        self.challan("2026-11-06T10:00", self.give(self.item3, 4))
+        # a week later: everything comes back
+        ch = self.challan("2026-11-13T10:00", self.back(faata, 10), self.back(self.item3, 4))
+        self.assertEqual(self.api.get(f"/api/challans/{ch['id']}").data["customer_pcs_out"], 0)
+
+        res = self.api.post("/api/bills", {"customer_id": self.cust.id, "upto": "2026-11-13T18:00"}, format="json")
+        self.assertEqual(res.status_code, 201, res.data)
+        bill = self.api.get(f"/api/bills/{res.data['id']}").data
+        got = sorted((l["item_name"], l["qty"], l["units"], l["amount"]) for l in bill["lines"])
+        self.assertEqual(
+            got,
+            [
+                ("Faata", 10, 12, 240.0),  # 10 x 12 days x 2
+                ("Plate 3x2", 5, 2, 50.0),  # 5 x 2 days x 5
+                ("Prop 12ft", 4, 7, 112.0),  # 4 x 7 days x 4
+            ],
+        )
+        self.assertEqual(bill["total"], 402.0)
+        self.assertEqual(Bill.objects.filter(customer=self.cust).count(), 1)
 
     def test_monthly_bills_do_not_double_charge(self):
         self.challan("2026-10-01T10:00", self.give(self.item1, 10))

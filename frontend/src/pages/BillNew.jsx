@@ -38,6 +38,7 @@ export default function BillNew() {
   const rent = pv ? Number(pv.rent_total) : 0;
   const lost = pv ? Number(pv.lost_total) : 0;
   const extrasTotal = extras.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+  const pcsStillOut = pv ? pv.lines.filter((l) => l.status === 'out').reduce((n, l) => n + l.qty, 0) : 0;
 
   const cust = customers.data.find((c) => String(c.id) === String(customerId));
   const mine = gstState(shop.gstin);
@@ -134,6 +135,13 @@ export default function BillNew() {
                   </details>
                 )}
                 {!pv.lines.length && <p className="muted">No rent to bill in this period.</p>}
+                {pcsStillOut > 0 && (
+                  <div className="banner">
+                    <b>{pcsStillOut} pcs are still with {cust?.name || 'the customer'}.</b> This bill charges them up to{' '}
+                    {fmtAt(upto)}; the days after that go on the next bill. For one bill for everything, make it after all
+                    items are back.
+                  </div>
+                )}
                 {pv.lost_lines.length > 0 && (
                   <>
                     <div className="rent-total lost">

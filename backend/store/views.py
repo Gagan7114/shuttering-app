@@ -783,6 +783,14 @@ def challan_detail_view(request, pk):
         prev = last_bill(ch.customer_id)
         data = challan_json(ch, prev.upto_at if prev else None)
         data["customer"] = CustomerSerializer(ch.customer).data
+        # Pieces the customer has right now: after a partial return the page suggests waiting
+        # and making one bill when everything is back, instead of a bill after every return.
+        data["customer_pcs_out"] = (
+            ChallanLine.objects.filter(challan__customer_id=ch.customer_id).aggregate(
+                n=Sum(Case(When(direction="out", then=F("qty")), default=-F("qty"), output_field=IntegerField()))
+            )["n"]
+            or 0
+        )
         data["shop"] = shop_json()
         if data["locked"]:
             data["locked_by_bill"] = prev.bill_no
