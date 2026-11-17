@@ -219,6 +219,12 @@ a.row-link:hover { background: #f7f8fa; text-decoration: none; }
 .issue-lists .card { margin-bottom: 0; }
 .pick-list.open { max-height: none; margin: 0; }
 
+/* ---------- return page: items of every site on one page ---------- */
+.return-sites { display: grid; gap: 18px; }
+.return-site-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; color: var(--accent-dark); }
+.return-site-head b { color: var(--ink); font-size: 16px; }
+.return-site-head .link-btn { margin-left: auto; }
+
 /* ---------- item quantity lists (issue / return) ---------- */
 .give-list { display: grid; gap: 8px; }
 .give-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
@@ -250,6 +256,7 @@ a.row-link:hover { background: #f7f8fa; text-decoration: none; }
 /* ---------- replace ---------- */
 .swap { display: grid; grid-template-columns: 1fr 34px 1fr; gap: 10px; align-items: start; padding: 14px; border: 1px solid var(--line); border-radius: 12px; margin-bottom: 12px; background: #fcfcfd; }
 .swap-head { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; min-height: 24px; }
+.swap-site { display: inline-flex; align-items: center; gap: 4px; margin-left: 10px; font-size: 14px; font-weight: 650; color: var(--accent-dark); }
 .swap-side { display: grid; gap: 6px; padding: 12px; border-radius: 10px; }
 .swap-side.back { background: var(--green-bg); }
 .swap-side.give { background: var(--blue-bg); }

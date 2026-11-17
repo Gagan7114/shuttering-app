@@ -247,6 +247,59 @@ class ShutteringAppFeatureTests(FlowBase):
         got = sorted((l["site_name"], l["qty"], l["units"]) for l in pv["lines"])
         self.assertEqual(got, [("GT Road", 5, 2), ("Model Town", 10, 2)])
 
+    def test_return_from_many_sites_in_one_go(self):
+        a, b = self.site("Main Road"), self.site("Model Town")
+        self.challan_at(a, "2026-11-01T10:00", self.give(self.item1, 5))
+        self.challan_at(b, "2026-11-01T11:00", self.give(self.item1, 1), self.give(self.item2, 2))
+
+        def ret(groups, expect):
+            body = {"customer_id": self.cust.id, "at": "2026-11-04T10:00", "vehicle": "pb10", "groups": groups}
+            res = self.api.post("/api/challans", body, format="json")
+            self.assertEqual(res.status_code, expect, res.data)
+            return res.data
+
+        # Model Town has only 1 plate: nothing is saved, not even the Main Road part
+        ret([{"site_id": a, "lines": [self.back(self.item1, 5)]}, {"site_id": b, "lines": [self.back(self.item1, 3)]}], 400)
+        self.assertEqual(self.items()["Plate 3x2"]["available"], 94)
+
+        res = ret(
+            [
+                {"site_id": a, "lines": [self.back(self.item1, 5)]},
+                {"site_id": b, "lines": [self.back(self.item1, 1), self.lost(self.item2, 1)]},
+            ],
+            201,
+        )
+        self.assertEqual(len(res["ids"]), 2)
+        made = [self.api.get(f"/api/challans/{i}").data for i in res["ids"]]
+        self.assertEqual([(c["site_name"], c["kind"], c["vehicle"]) for c in made], [("Main Road", "return", "PB10"), ("Model Town", "return", "PB10")])
+        acc = self.api.get(f"/api/customers/{self.cust.id}").data
+        self.assertEqual([(h["site_name"], h["item_name"], h["qty"]) for h in acc["holdings"]], [("Model Town", "Prop 10ft", 1)])
+        self.assertEqual(self.items()["Plate 3x2"]["available"], 100)
+
+    def test_replace_at_many_sites_in_one_go(self):
+        a, b = self.site("Main Road"), self.site("Model Town")
+        self.challan_at(a, "2026-11-01T10:00", self.give(self.item1, 5))
+        self.challan_at(b, "2026-11-01T11:00", self.give(self.item3, 50))  # no Prop 12ft left in store
+
+        def swap(give_at_a, expect):
+            groups = [
+                {"site_id": a, "lines": [self.back(self.item1, 5), self.give(self.item3, give_at_a, replaces_item_id=self.item1.id)]},
+                {"site_id": b, "lines": [self.back(self.item3, 5), self.give(self.item1, 5, replaces_item_id=self.item3.id)]},
+            ]
+            body = {"customer_id": self.cust.id, "at": "2026-11-04T10:00", "groups": groups}
+            res = self.api.post("/api/challans", body, format="json")
+            self.assertEqual(res.status_code, expect, res.data)
+            return res.data
+
+        # Main Road can't get 6 props: only the 5 coming back from Model Town are free
+        self.assertIn("Prop 12ft", str(swap(6, 400)))
+        # Main Road gets the 5 props that Model Town gives back, in the same save
+        res = swap(5, 201)
+        self.assertEqual([self.api.get(f"/api/challans/{i}").data["kind"] for i in res["ids"]], ["swap", "swap"])
+        acc = self.api.get(f"/api/customers/{self.cust.id}").data
+        got = sorted((h["site_name"], h["item_name"], h["qty"]) for h in acc["holdings"])
+        self.assertEqual(got, [("Main Road", "Prop 12ft", 5), ("Model Town", "Plate 3x2", 5), ("Model Town", "Prop 12ft", 45)])
+
     def test_site_of_another_customer_is_rejected(self):
         other = Customer.objects.create(name="Customer B")
         their_site = self.site("Their site", other)

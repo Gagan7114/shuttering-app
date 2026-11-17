@@ -19,6 +19,8 @@ export default function ChallanView() {
   const given = t.lines.filter((l) => l.direction === 'out');
   const back = t.lines.filter((l) => l.direction === 'in' && !l.lost);
   const lost = t.lines.filter((l) => l.lost);
+  // Other challans saved in the same go (a return from several sites makes one challan per site).
+  const more = (params.get('more') || '').split(',').filter((x) => /^\d+$/.test(x));
 
   async function remove() {
     if (!confirmAction(`Delete challan #${t.id}? Stock will be put back as it was.`)) return;
@@ -58,6 +60,17 @@ export default function ChallanView() {
         <div className="banner ok no-print done">
           <Icon name="check" size={20} />
           <span>Saved. Store stock is updated.</span>
+          {more.length > 0 && (
+            <span>
+              One challan per site. Also made:{' '}
+              {more.map((m, i) => (
+                <span key={m}>
+                  {i > 0 && ', '}
+                  <Link to={`/challans/${m}`}>Challan #{m}</Link>
+                </span>
+              ))}
+            </span>
+          )}
           <span className="done-links">
             <Link to="/">Home</Link>
             {t.kind !== 'issue' && t.customer_pcs_out === 0 && (

@@ -3,15 +3,23 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { CustomerPicker } from '../components/CustomerPicker';
 import { bySite } from '../components/shared';
-import { NO_SITE, SitePicker, siteIdOf } from '../components/SitePicker';
+import { NO_SITE, siteIdOf } from '../components/SitePicker';
 import { money, nowLocal, per, rateText } from '../format';
 import Icon from '../icons';
 import { Card, Empty, Loading, NoteField, PageHead, QtyInput, SaveBar, Segmented, WhenField, useLoad, useToast } from '../ui';
 import { workLink } from '../work';
 
+const siteKey = (siteId) => (siteId ? String(siteId) : NO_SITE);
+// The same item can be at two sites of one customer, so "comes back" picks an item at a site.
+const holdingKey = (h) => `${siteKey(h.site_id)}:${h.item_id}`;
+
+/*
+ * Replace items. Everything the customer has, at every site, is on one page; the item given
+ * instead goes to the same site as the one coming back. Saving makes one challan per site.
+ */
 const newSwap = () => ({
   key: Math.random().toString(36).slice(2),
-  back_item: '',
+  back_item: '', // holdingKey
   back_qty: '',
   give_item: '',
   give_qty: '',
@@ -30,7 +38,6 @@ export default function Replace() {
 
   const [customerId, setCustomerId] = useState(params.get('customer') || '');
   const account = useLoad(() => (customerId ? api(`/customers/${customerId}`) : Promise.resolve(null)), [customerId]);
-  const [site, setSite] = useState(null);
   const [swaps, setSwaps] = useState([newSwap()]);
   const [at, setAt] = useState('');
   const [note, setNote] = useState('');
@@ -39,40 +46,44 @@ export default function Replace() {
 
   if (!customers.data || !items.data) return <Loading error={customers.error || items.error} />;
 
-  const siteKey = (siteId) => (siteId ? String(siteId) : NO_SITE);
-  const all = account.data?.holdings || [];
-  const groups = bySite(all);
-  const chosenSite = site ?? (groups.length === 1 ? siteKey(groups[0][0]) : null);
-  const holdings = chosenSite === null ? [] : all.filter((h) => siteKey(h.site_id) === chosenSite);
-  const showSites = groups.length > 1 || (groups.length === 1 && groups[0][1]);
-  const holding = (id) => holdings.find((h) => h.item_id === Number(id));
+  const holdings = account.data?.holdings || [];
+  const groups = bySite(holdings);
+  const showSites = groups.length > 1 || (groups.length === 1 && !!groups[0][1]);
+  const manySites = groups.length > 1;
+  const holding = (key) => holdings.find((h) => holdingKey(h) === key);
   const item = (id) => items.data.find((i) => i.id === Number(id));
   const int = (v) => (v === '' ? 0 : Number(v));
 
-  // totals per item, to warn before saving
+  // totals, to warn before saving: coming back per item at a site, and per item for store stock
   const backBy = {};
+  const backByItem = {};
   const giveBy = {};
   for (const s of swaps) {
-    if (s.back_item) backBy[s.back_item] = (backBy[s.back_item] || 0) + int(s.back_qty);
+    const h = holding(s.back_item);
+    if (h) {
+      backBy[s.back_item] = (backBy[s.back_item] || 0) + int(s.back_qty);
+      backByItem[h.item_id] = (backByItem[h.item_id] || 0) + int(s.back_qty);
+    }
     if (s.give_item) giveBy[s.give_item] = (giveBy[s.give_item] || 0) + int(s.give_qty);
   }
-  const tooManyBack = (id) => (holding(id) ? backBy[id] > holding(id).qty : false);
-  const tooManyGive = (id) => (item(id) ? (giveBy[id] || 0) - (backBy[id] || 0) > item(id).available : false);
+  const tooManyBack = (key) => (holding(key) ? backBy[key] > holding(key).qty : false);
+  // Pieces coming back at any site are free to give out again in the same save.
+  const tooManyGive = (id) => (item(id) ? (giveBy[id] || 0) - (backByItem[id] || 0) > item(id).available : false);
 
   const update = (key, patch) => setSwaps((all) => all.map((s) => (s.key === key ? { ...s, ...patch } : s)));
 
   function chooseCustomer(id) {
     setCustomerId(id);
-    setSite(null);
     setSwaps([newSwap()]);
     setErr('');
   }
 
-  function buildLines() {
+  /** One group of lines per site: [{ site_id, lines }]. Throws a readable Error for bad input. */
+  function buildGroups() {
     const used = swaps.filter((s) => s.back_item || s.give_item || s.back_qty || s.give_qty);
     if (!used.length) throw new Error('Choose the item coming back and the item given instead.');
-    const inLines = {};
-    const outLines = [];
+    const inLines = {}; // holdingKey -> qty
+    const outLines = {}; // siteKey -> lines
     for (const s of used) {
       const h = holding(s.back_item);
       if (!h) throw new Error('Choose which item the customer gave back.');
@@ -83,8 +94,10 @@ export default function Replace() {
       const gq = int(s.give_qty);
       if (!Number.isInteger(gq) || gq < 1) throw new Error(`Enter how many ${it.name} were given.`);
       if (s.rate === '' || !(Number(s.rate) >= 0)) throw new Error(`Rent for ${it.name} is not valid.`);
-      inLines[h.item_id] = (inLines[h.item_id] || 0) + bq;
-      outLines.push({
+      inLines[s.back_item] = (inLines[s.back_item] || 0) + bq;
+      const k = siteKey(h.site_id);
+      outLines[k] = outLines[k] || [];
+      outLines[k].push({
         item_id: it.id,
         direction: 'out',
         qty: gq,
@@ -93,30 +106,33 @@ export default function Replace() {
         replaces_item_id: h.item_id,
       });
     }
-    for (const [id, q] of Object.entries(inLines)) {
-      const h = holding(id);
-      if (q > h.qty) throw new Error(`${h.item_name}: customer has only ${h.qty}, you entered ${q}.`);
+    const bySiteLines = {};
+    for (const [key, q] of Object.entries(inLines)) {
+      const h = holding(key);
+      const at = manySites && h.site_name ? ` at ${h.site_name}` : '';
+      if (q > h.qty) throw new Error(`${h.item_name}${at}: customer has only ${h.qty}, you entered ${q}.`);
+      const k = siteKey(h.site_id);
+      bySiteLines[k] = bySiteLines[k] || [];
+      bySiteLines[k].push({ item_id: h.item_id, direction: 'in', qty: q });
     }
     for (const id of Object.keys(giveBy)) {
       if (tooManyGive(id)) throw new Error(`Only ${item(id).available} ${item(id).unit} of ${item(id).name} in store.`);
     }
-    return [
-      ...Object.entries(inLines).map(([id, q]) => ({ item_id: Number(id), direction: 'in', qty: q })),
-      ...outLines,
-    ];
+    return Object.entries(bySiteLines).map(([k, lines]) => ({ site_id: siteIdOf(k), lines: [...lines, ...outLines[k]] }));
   }
 
   async function save() {
     setErr('');
     try {
-      const lines = buildLines();
+      const groupsToSave = buildGroups();
       setBusy(true);
       const res = await api('/challans', {
         method: 'POST',
-        body: { customer_id: Number(customerId), site_id: siteIdOf(chosenSite), at: at || nowLocal(), note, lines },
+        body: { customer_id: Number(customerId), at: at || nowLocal(), note, groups: groupsToSave },
       });
-      toast('Saved. Stock updated.');
-      navigate(`/challans/${res.id}?new=1`);
+      toast(res.ids.length > 1 ? `Saved. Stock updated. ${res.ids.length} challans made, one for each site.` : 'Saved. Stock updated.');
+      const more = res.ids.slice(1);
+      navigate(`/challans/${res.id}?new=1${more.length ? `&more=${more.join(',')}` : ''}`);
     } catch (e) {
       setErr(e.message);
       setBusy(false);
@@ -125,6 +141,7 @@ export default function Replace() {
 
   const backTotal = swaps.reduce((s, x) => s + (x.back_item ? int(x.back_qty) : 0), 0);
   const giveTotal = swaps.reduce((s, x) => s + (x.give_item ? int(x.give_qty) : 0), 0);
+  const sitesInUse = new Set(swaps.map((x) => holding(x.back_item)).filter(Boolean).map((h) => siteKey(h.site_id)));
 
   return (
     <>
@@ -143,25 +160,8 @@ export default function Replace() {
         />
       </Card>
 
-      {customerId && account.data && showSites && (
-        <Card title="At which site?" step="2">
-          <SitePicker
-            options={groups.map(([id, name, hs]) => [
-              siteKey(id),
-              name || 'No site given',
-              `${hs.reduce((n, h) => n + h.qty, 0)} pcs there`,
-            ])}
-            value={chosenSite}
-            onChange={(v) => {
-              setSite(v);
-              setSwaps([newSwap()]);
-            }}
-          />
-        </Card>
-      )}
-
-      {customerId && (chosenSite !== null || !account.data || !all.length) && (
-        <Card title="What is being replaced?" step={showSites ? '3' : '2'}>
+      {customerId && (
+        <Card title="What is being replaced?" step="2">
           {!account.data ? (
             <Loading error={account.error} />
           ) : holdings.length === 0 ? (
@@ -176,7 +176,14 @@ export default function Replace() {
                 return (
                   <div className="swap" key={s.key}>
                     <div className="swap-head">
-                      <b>Replacement {swaps.length > 1 ? i + 1 : ''}</b>
+                      <b>
+                        Replacement {swaps.length > 1 ? i + 1 : ''}
+                        {manySites && h && (
+                          <span className="swap-site">
+                            <Icon name="pin" size={14} /> {h.site_name || 'No site given'}
+                          </span>
+                        )}
+                      </b>
                       {swaps.length > 1 && (
                         <button
                           type="button"
@@ -200,11 +207,21 @@ export default function Replace() {
                           className={!s.back_item ? 'placeholder' : ''}
                         >
                           <option value="">Choose item…</option>
-                          {holdings.map((x) => (
-                            <option key={x.item_id} value={x.item_id}>
-                              {x.item_name} (has {x.qty})
-                            </option>
-                          ))}
+                          {showSites
+                            ? groups.map(([siteId, siteName, hs]) => (
+                                <optgroup key={siteKey(siteId)} label={siteName || 'No site given'}>
+                                  {hs.map((x) => (
+                                    <option key={holdingKey(x)} value={holdingKey(x)}>
+                                      {x.item_name} (has {x.qty})
+                                    </option>
+                                  ))}
+                                </optgroup>
+                              ))
+                            : holdings.map((x) => (
+                                <option key={holdingKey(x)} value={holdingKey(x)}>
+                                  {x.item_name} (has {x.qty})
+                                </option>
+                              ))}
                         </select>
                         <QtyInput
                           value={s.back_qty}
@@ -317,6 +334,7 @@ export default function Replace() {
               backTotal || giveTotal ? (
                 <>
                   <b>{backTotal}</b> back · <b>{giveTotal}</b> given
+                  {sitesInUse.size > 1 && ` · at ${sitesInUse.size} sites`}
                 </>
               ) : (
                 <span className="muted">Nothing entered yet</span>

@@ -663,6 +663,11 @@ def challans_view(request):
 
 
 def create_challan(request):
+    """
+    Save one challan, or several at once: `groups` = [{site_id, lines}, ...] makes one challan per site
+    (Return page: a customer with many sites brings items back from more than one). All are saved
+    together or not at all.
+    """
     data = request.data
     # Either an existing customer (customer_id), or a new one typed in on the Issue page
     # (new_customer: {name, phone}) that is saved together with this challan.
@@ -675,15 +680,19 @@ def create_challan(request):
         new_customer.is_valid(raise_exception=True)
     else:
         customer_id = to_int(data.get("customer_id"), "Customer", 1)
-    new_site = str(data.get("new_site") or "").strip()[:120]
     at = parse_at(data.get("at"))
     if at > timezone.now() + timedelta(days=1):
         raise ApiError("Date & time is in the future.")
     note = str(data.get("note") or "").strip()[:300]
     vehicle = str(data.get("vehicle") or "").strip().upper()[:30]
-    raw_lines = data.get("lines")
-    if not isinstance(raw_lines, list) or not raw_lines:
+    groups = data.get("groups")
+    if groups is None:
+        groups = [{"site_id": data.get("site_id"), "new_site": data.get("new_site"), "lines": data.get("lines")}]
+    if not isinstance(groups, list) or not groups:
         raise ApiError("Add at least one item.")
+    for g in groups:
+        if not isinstance(g, dict) or not isinstance(g.get("lines"), list) or not g["lines"]:
+            raise ApiError("Add at least one item.")
 
     with transaction.atomic():
         if new_customer:
@@ -694,14 +703,6 @@ def create_challan(request):
             customer = Customer.objects.select_for_update().filter(pk=customer_id).first()
             if customer is None:
                 raise ApiError("Customer not found.", 404)
-        site = None
-        if data.get("site_id"):
-            site = Site.objects.filter(pk=to_int(data["site_id"], "Site", 1), customer=customer).first()
-            if site is None:
-                raise ApiError("That site does not belong to this customer. Reload the page and try again.")
-        elif new_site:
-            site = Site.objects.filter(customer=customer, name__iexact=new_site).first()
-            site = site or Site.objects.create(customer=customer, name=new_site)
         prev = last_bill(customer.id)
         if prev and at <= prev.upto_at:
             raise ApiError(
@@ -709,71 +710,100 @@ def create_challan(request):
                 "New entries must be after that time (or delete that bill first)."
             )
 
-        wanted_ids = set()
-        for r in raw_lines:
-            wanted_ids.add(to_int(r.get("item_id"), "Item", 1))
-            if r.get("replaces_item_id"):
-                wanted_ids.add(to_int(r.get("replaces_item_id"), "Replaced item", 1))
-        items = {i.id: i for i in Item.objects.select_for_update().filter(id__in=sorted(wanted_ids)).order_by("id")}
-        if len(items) != len(wanted_ids):
-            raise ApiError("One of the items was not found. Reload the page and try again.")
+        made = []
+        net_out = {}  # item id -> pieces leaving the store, over all challans in this save
+        for g in groups:
+            site = None
+            new_site = str(g.get("new_site") or "").strip()[:120]
+            if g.get("site_id"):
+                site = Site.objects.filter(pk=to_int(g["site_id"], "Site", 1), customer=customer).first()
+                if site is None:
+                    raise ApiError("That site does not belong to this customer. Reload the page and try again.")
+            elif new_site:
+                site = Site.objects.filter(customer=customer, name__iexact=new_site).first()
+                site = site or Site.objects.create(customer=customer, name=new_site)
+            challan, net = save_challan(request.user, customer, site, at, vehicle, note, g["lines"])
+            made.append(challan)
+            for item_id, n in net.items():
+                net_out[item_id] = net_out.get(item_id, 0) + n
 
-        lines = []
-        net_out = {}
-        for r in raw_lines:
-            item = items[int(r["item_id"])]
-            direction = r.get("direction")
-            if direction not in ("out", "in"):
-                raise ApiError("Each line must be 'out' (given) or 'in' (returned).")
-            qty = to_int(r.get("qty"), f"Quantity of {item.name}", 1)
-            line = ChallanLine(item=item, direction=direction, qty=qty)
-            if direction == "in" and r.get("lost"):
-                line.lost = True
-                line.rate = (
-                    item.lost_rate
-                    if r.get("rate") in (None, "")
-                    else to_money(r.get("rate"), f"Price of lost {item.name}")
-                )
-            if direction == "out":
-                line.rate = item.rate if r.get("rate") in (None, "") else to_money(r.get("rate"), f"Rent of {item.name}")
-                line.basis = r.get("basis") or item.basis
-                if line.basis not in ("day", "hour"):
-                    raise ApiError("Rent must be per day or per hour.")
-                if r.get("replaces_item_id"):
-                    line.replaces = items[int(r["replaces_item_id"])]
-            lines.append(line)
-            # Lost pieces leave the customer but don't come back to the store
-            # (total stock goes down by the same amount), so free stock stays the same.
-            if not line.lost:
-                net_out[item.id] = net_out.get(item.id, 0) + (qty if direction == "out" else -qty)
-
+        # Store stock is checked once for the whole save, so pieces returned at one site
+        # can be given out at another site in the same go.
         out_now = out_qty_by_item(net_out.keys())
-        for item_id, n in net_out.items():
-            item = items[item_id]
-            available = item.total_qty - out_now.get(item_id, 0)
-            if n > available:
-                raise ApiError(f"Only {available} {item.unit} of {item.name} left in store, you entered {n}.")
-
-        directions = {l.direction for l in lines}
-        kind = "swap" if len(directions) == 2 else ("issue" if "out" in directions else "return")
-        challan = Challan.objects.create(
-            customer=customer, site=site, kind=kind, at=at, vehicle=vehicle, note=note, created_by=request.user
-        )
-        for line in lines:
-            line.challan = challan
-        ChallanLine.objects.bulk_create(lines)
+        for item in Item.objects.filter(id__in=[i for i, n in net_out.items() if n > 0]).order_by("id"):
+            n = net_out[item.id]
+            free_after = item.total_qty - out_now.get(item.id, 0)
+            if free_after < 0:
+                raise ApiError(f"Only {free_after + n} {item.unit} of {item.name} left in store, you entered {n}.")
 
         try:
             build_ledger(customer.id, strict=True)  # no return may exceed what the customer had
         except LedgerError as e:
             raise ApiError(str(e))
 
-        # Lost pieces are gone for good: the shop now owns fewer.
-        for line in lines:
-            if line.lost:
-                Item.objects.filter(pk=line.item_id).update(total_qty=F("total_qty") - line.qty)
+    first = made[0]
+    return Response(
+        {"id": first.id, "kind": first.kind, "customer_id": customer.id, "ids": [c.id for c in made]}, status=201
+    )
 
-    return Response({"id": challan.id, "kind": kind, "customer_id": customer.id}, status=201)
+
+def save_challan(user, customer, site, at, vehicle, note, raw_lines):
+    """
+    One challan with its lines. Returns (challan, {item id: pieces leaving the store}).
+    Call inside a transaction; the caller checks store stock afterwards.
+    """
+    wanted_ids = set()
+    for r in raw_lines:
+        wanted_ids.add(to_int(r.get("item_id"), "Item", 1))
+        if r.get("replaces_item_id"):
+            wanted_ids.add(to_int(r.get("replaces_item_id"), "Replaced item", 1))
+    items = {i.id: i for i in Item.objects.select_for_update().filter(id__in=sorted(wanted_ids)).order_by("id")}
+    if len(items) != len(wanted_ids):
+        raise ApiError("One of the items was not found. Reload the page and try again.")
+
+    lines = []
+    net_out = {}
+    for r in raw_lines:
+        item = items[int(r["item_id"])]
+        direction = r.get("direction")
+        if direction not in ("out", "in"):
+            raise ApiError("Each line must be 'out' (given) or 'in' (returned).")
+        qty = to_int(r.get("qty"), f"Quantity of {item.name}", 1)
+        line = ChallanLine(item=item, direction=direction, qty=qty)
+        if direction == "in" and r.get("lost"):
+            line.lost = True
+            line.rate = (
+                item.lost_rate
+                if r.get("rate") in (None, "")
+                else to_money(r.get("rate"), f"Price of lost {item.name}")
+            )
+        if direction == "out":
+            line.rate = item.rate if r.get("rate") in (None, "") else to_money(r.get("rate"), f"Rent of {item.name}")
+            line.basis = r.get("basis") or item.basis
+            if line.basis not in ("day", "hour"):
+                raise ApiError("Rent must be per day or per hour.")
+            if r.get("replaces_item_id"):
+                line.replaces = items[int(r["replaces_item_id"])]
+        lines.append(line)
+        # Lost pieces leave the customer but don't come back to the store
+        # (total stock goes down by the same amount), so free stock stays the same.
+        if not line.lost:
+            net_out[item.id] = net_out.get(item.id, 0) + (qty if direction == "out" else -qty)
+
+    directions = {l.direction for l in lines}
+    kind = "swap" if len(directions) == 2 else ("issue" if "out" in directions else "return")
+    challan = Challan.objects.create(
+        customer=customer, site=site, kind=kind, at=at, vehicle=vehicle, note=note, created_by=user
+    )
+    for line in lines:
+        line.challan = challan
+    ChallanLine.objects.bulk_create(lines)
+
+    # Lost pieces are gone for good: the shop now owns fewer.
+    for line in lines:
+        if line.lost:
+            Item.objects.filter(pk=line.item_id).update(total_qty=F("total_qty") - line.qty)
+    return challan, net_out
 
 
 @api_view(["GET", "DELETE"])
