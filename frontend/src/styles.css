@@ -208,6 +208,17 @@ a.row-link:hover { background: #f7f8fa; text-decoration: none; }
 .pick-list .pad { padding: 14px; }
 .picker-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
 
+/* ---------- issue page: new entry box + two lists below ---------- */
+.entry-fields { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto; gap: 12px; align-items: end; }
+.entry-fields .f { margin-bottom: 0; }
+.entry-next { min-height: 44px; }
+.entry-matches, .entry-alike { margin-top: 14px; }
+.entry-alike { padding: 12px 14px; border-radius: 10px; background: var(--warn-bg); }
+.entry-alike .pick-list { background: #fff; }
+.issue-lists { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.issue-lists .card { margin-bottom: 0; }
+.pick-list.open { max-height: none; margin: 0; }
+
 /* ---------- item quantity lists (issue / return) ---------- */
 .give-list { display: grid; gap: 8px; }
 .give-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
@@ -451,6 +462,13 @@ input[type='checkbox'] { width: 20px; height: 20px; min-height: 0; padding: 0; f
 .login .btn { width: 100%; margin-top: 6px; }
 .login .key-box .btn { width: auto; margin: 0; }
 .login-switch { display: block; margin: 16px auto 0; }
+.login .btn.login-create { margin-top: 14px; }
+.row-btns { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.login-row { flex-wrap: wrap; }
+@media (max-width: 600px) {
+  .login-row .row-btns { flex-basis: 100%; justify-content: flex-start; padding-left: 44px; }
+}
+.row-link.off .row-title { color: var(--muted); }
 .login-help { margin-top: 16px; padding: 12px; border-radius: 10px; background: var(--slate-bg); font-size: 14px; color: var(--ink-2); line-height: 1.5; }
 .login-help code { background: #fff; }
 .key-input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0.06em; }
@@ -459,7 +477,7 @@ input[type='checkbox'] { width: 20px; height: 20px; min-height: 0; padding: 0; f
 
 /* ---------- tablets & phones ---------- */
 @media (max-width: 1000px) {
-  .home-grid { grid-template-columns: 1fr; }
+  .home-grid, .issue-lists { grid-template-columns: 1fr; }
   .tiles { grid-template-columns: repeat(2, 1fr); }
 }
 
@@ -483,6 +501,8 @@ input[type='checkbox'] { width: 20px; height: 20px; min-height: 0; padding: 0; f
   .tile-text span { display: none; }
   .work-icon { width: 42px; height: 42px; border-radius: 12px; }
   .card { padding: 16px 14px; }
+  .entry-fields { grid-template-columns: 1fr; }
+  .entry-next { width: 100%; }
   .card.quiet { padding: 10px 14px; }
   .grid2 { grid-template-columns: 1fr; }
   .stats { grid-template-columns: 1fr 1fr; gap: 8px; }

@@ -4,7 +4,7 @@ import secrets
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-from django.contrib.auth import authenticate, get_user_model, login, logout
+from django.contrib.auth import authenticate, get_user_model, login, logout, update_session_auth_hash
 from django.contrib.auth.hashers import check_password, make_password
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
@@ -17,7 +17,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.exceptions import APIException
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, BasePermission
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.response import Response
 
@@ -251,13 +251,26 @@ def customer_money(customer_ids=None):
 # --------------------------------------------------------------------------- auth
 
 
+def is_shop_computer(request):
+    """True when the browser runs on the computer the app runs on. Phones on the Wi-Fi
+    connect with their own address. (The Vite dev server listens on this computer only,
+    so requests through it also come from here; don't start it with --host.)"""
+    return request.META.get("REMOTE_ADDR") in ("127.0.0.1", "::1")
+
+
+def user_json(user):
+    """Who is logged in. Owner = superuser: can manage logins and open Django admin."""
+    return {"username": user.username, "is_staff": user.is_staff, "is_owner": user.is_superuser}
+
+
+
 @ensure_csrf_cookie
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def me_view(request):
     if not request.user.is_authenticated:
-        return Response({"user": None})
-    return Response({"user": {"username": request.user.username, "is_staff": request.user.is_staff}, "shop": shop_json()})
+        return Response({"user": None, "shop_computer": is_shop_computer(request)})
+    return Response({"user": user_json(request.user), "shop": shop_json()})
 
 
 @api_view(["POST"])
@@ -269,7 +282,7 @@ def login_view(request):
     if user is None:
         raise ApiError("Wrong username or password.")
     login(request, user)
-    return Response({"user": {"username": user.username, "is_staff": user.is_staff}, "shop": shop_json()})
+    return Response({"user": user_json(user), "shop": shop_json()})
 
 
 @api_view(["POST"])
@@ -298,6 +311,34 @@ class ResetThrottle(AnonRateThrottle):
 
     scope = "password_reset"
     rate = "10/hour"
+
+
+class CreateLoginThrottle(AnonRateThrottle):
+    scope = "create_login"
+    rate = "10/hour"
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+@throttle_classes([CreateLoginThrottle])
+def create_login_view(request):
+    """Make a new owner login from the login page — only on the shop computer itself,
+    for when nobody can log in. Everywhere else, the owner adds logins in Settings."""
+    if not is_shop_computer(request):
+        raise ApiError("New logins can be made only on the shop computer, or by the owner in Settings.", 403)
+    User = get_user_model()
+    username = str(request.data.get("username", "")).strip()
+    if not USERNAME_RE.match(username):
+        raise ApiError("Username can have letters, numbers and . @ + - _ only (no spaces).")
+    if User.objects.filter(username__iexact=username).exists():
+        raise ApiError("This username is already taken. Pick another name.")
+    user = User(username=username, is_staff=True, is_superuser=True)
+    password = str(request.data.get("password") or "")
+    check_new_password(password, user)
+    user.set_password(password)
+    user.save()
+    login(request, user, backend="django.contrib.auth.backends.ModelBackend")
+    return Response({"user": user_json(user), "shop": shop_json()}, status=201)
 
 
 @api_view(["GET", "POST"])
@@ -336,8 +377,94 @@ def reset_password_view(request):
     fresh_key = new_recovery_key(user)
     login(request, user, backend="django.contrib.auth.backends.ModelBackend")
     return Response(
-        {"user": {"username": user.username, "is_staff": user.is_staff}, "shop": shop_json(), "recovery_key": fresh_key}
+        {"user": user_json(user), "shop": shop_json(), "recovery_key": fresh_key}
     )
+
+
+# --------------------------------------------------------------------------- logins (owner only)
+
+USERNAME_RE = re.compile(r"^[\w.@+-]{1,150}$")
+ROLES = ("owner", "staff")
+
+
+class IsOwner(BasePermission):
+    message = "Only the owner can manage logins."
+
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and request.user.is_superuser)
+
+
+def login_row(user, keys):
+    return {
+        "id": user.id,
+        "username": user.username,
+        "role": "owner" if user.is_superuser else "staff",
+        "is_active": user.is_active,
+        "last_login": at_str(user.last_login),
+        "has_key": user.id in keys,
+    }
+
+
+def check_new_password(password, user):
+    try:
+        validate_password(password, user)
+    except ValidationError as e:
+        raise ApiError(" ".join(e.messages))
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsOwner])
+def logins_view(request):
+    User = get_user_model()
+    if request.method == "POST":
+        username = str(request.data.get("username", "")).strip()
+        if not USERNAME_RE.match(username):
+            raise ApiError("Username can have letters, numbers and . @ + - _ only (no spaces).")
+        if User.objects.filter(username__iexact=username).exists():
+            raise ApiError("This username is already taken.")
+        role = request.data.get("role") or "staff"
+        if role not in ROLES:
+            raise ApiError("Role must be owner or staff.")
+        user = User(username=username, is_staff=role == "owner", is_superuser=role == "owner")
+        password = str(request.data.get("password") or "")
+        check_new_password(password, user)
+        user.set_password(password)
+        user.save()
+        return Response(login_row(user, set()), status=201)
+
+    keys = set(RecoveryKey.objects.values_list("user_id", flat=True))
+    return Response([login_row(u, keys) for u in User.objects.order_by("username")])
+
+
+@api_view(["PUT"])
+@permission_classes([IsOwner])
+def login_detail_view(request, pk):
+    """Change role, switch on/off, or set a new password. You can't lock yourself out."""
+    data = request.data
+    with transaction.atomic():
+        user = get_object_or_404(get_user_model().objects.select_for_update(), pk=pk)
+        fields = []
+        if "role" in data or "is_active" in data:
+            role = data.get("role", "owner" if user.is_superuser else "staff")
+            active = data.get("is_active", user.is_active)
+            if role not in ROLES or not isinstance(active, bool):
+                raise ApiError("Role must be owner or staff, and on/off must be true or false.")
+            if user.pk == request.user.pk and (role != "owner" or not active):
+                raise ApiError("You can't switch off your own login or make it staff.")
+            user.is_superuser = user.is_staff = role == "owner"
+            user.is_active = active
+            fields += ["is_superuser", "is_staff", "is_active"]
+        if data.get("password") not in (None, ""):
+            password = str(data["password"])
+            check_new_password(password, user)
+            user.set_password(password)
+            fields.append("password")
+        if fields:
+            user.save(update_fields=fields)
+    if user.pk == request.user.pk and "password" in fields:
+        update_session_auth_hash(request, user)  # stay logged in after changing your own password
+    keys = set(RecoveryKey.objects.values_list("user_id", flat=True))
+    return Response(login_row(user, keys))
 
 
 # --------------------------------------------------------------------------- settings
@@ -537,7 +664,18 @@ def challans_view(request):
 
 def create_challan(request):
     data = request.data
-    customer_id = to_int(data.get("customer_id"), "Customer", 1)
+    # Either an existing customer (customer_id), or a new one typed in on the Issue page
+    # (new_customer: {name, phone}) that is saved together with this challan.
+    new_customer = None
+    if data.get("new_customer"):
+        raw = data["new_customer"]
+        if not isinstance(raw, dict):
+            raise ApiError("Customer details are not valid.")
+        new_customer = CustomerSerializer(data={k: str(raw.get(k) or "").strip() for k in ("name", "phone")})
+        new_customer.is_valid(raise_exception=True)
+    else:
+        customer_id = to_int(data.get("customer_id"), "Customer", 1)
+    new_site = str(data.get("new_site") or "").strip()[:120]
     at = parse_at(data.get("at"))
     if at > timezone.now() + timedelta(days=1):
         raise ApiError("Date & time is in the future.")
@@ -548,15 +686,22 @@ def create_challan(request):
         raise ApiError("Add at least one item.")
 
     with transaction.atomic():
-        # Lock the customer row so two people can't edit the same account at once.
-        customer = Customer.objects.select_for_update().filter(pk=customer_id).first()
-        if customer is None:
-            raise ApiError("Customer not found.", 404)
+        if new_customer:
+            # Saved inside this transaction: if anything below fails, no half-made customer is left behind.
+            customer = new_customer.save()
+        else:
+            # Lock the customer row so two people can't edit the same account at once.
+            customer = Customer.objects.select_for_update().filter(pk=customer_id).first()
+            if customer is None:
+                raise ApiError("Customer not found.", 404)
         site = None
         if data.get("site_id"):
             site = Site.objects.filter(pk=to_int(data["site_id"], "Site", 1), customer=customer).first()
             if site is None:
                 raise ApiError("That site does not belong to this customer. Reload the page and try again.")
+        elif new_site:
+            site = Site.objects.filter(customer=customer, name__iexact=new_site).first()
+            site = site or Site.objects.create(customer=customer, name=new_site)
         prev = last_bill(customer.id)
         if prev and at <= prev.upto_at:
             raise ApiError(
@@ -628,7 +773,7 @@ def create_challan(request):
             if line.lost:
                 Item.objects.filter(pk=line.item_id).update(total_qty=F("total_qty") - line.qty)
 
-    return Response({"id": challan.id, "kind": kind}, status=201)
+    return Response({"id": challan.id, "kind": kind, "customer_id": customer.id}, status=201)
 
 
 @api_view(["GET", "DELETE"])

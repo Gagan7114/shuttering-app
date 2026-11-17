@@ -3,10 +3,11 @@ import { api } from '../api';
 import { RecoveryKeyBox } from '../components/RecoveryKeyBox';
 import { useShop } from '../components/shared';
 import { DAY_MODES, fmtAt } from '../format';
-import { Card, Field, Loading, PageHead, confirmAction, useLoad, useToast } from '../ui';
+import Icon from '../icons';
+import { Card, Field, Loading, Modal, PageHead, Segmented, confirmAction, useLoad, useToast } from '../ui';
 
 export default function Settings() {
-  const { setShop } = useShop();
+  const { setShop, user } = useShop();
   const toast = useToast();
   const { data, error } = useLoad(() => api('/settings'), []);
   const [f, setF] = useState(null);
@@ -119,6 +120,8 @@ export default function Settings() {
         </div>
       </form>
 
+      {user?.is_owner && <LoginsCard me={user.username} />}
+
       <RecoveryKeyCard />
 
       <Card title="Backup & admin">
@@ -131,7 +134,7 @@ export default function Settings() {
           </a>
         </p>
         <p className="muted small">
-          Use the admin to add staff logins or change passwords. For a full database backup you can also run{' '}
+          Logins are managed above (owner only). For a full database backup you can also run{' '}
           <code>./backup.sh</code> (uses pg_dump).
         </p>
       </Card>
@@ -191,5 +194,161 @@ function RecoveryKeyCard() {
         No key? On the shop computer run <code>./reset-password.sh</code> in the <code>shuttring</code> folder.
       </p>
     </Card>
+  );
+}
+
+const ROLE_TEXT = { owner: 'Owner', staff: 'Staff' };
+
+/** Owner only: add logins, set passwords, switch logins off. */
+function LoginsCard({ me }) {
+  const toast = useToast();
+  const { data, error, reload } = useLoad(() => api('/logins'), []);
+  const [adding, setAdding] = useState(false);
+  const [pwFor, setPwFor] = useState(null);
+
+  async function toggle(u) {
+    const off = u.is_active;
+    if (off && !confirmAction(`Switch off ${u.username}? They will not be able to log in until you switch it on again.`))
+      return;
+    try {
+      await api(`/logins/${u.id}`, { method: 'PUT', body: { is_active: !off } });
+      toast(off ? `${u.username} switched off` : `${u.username} can log in again`);
+      reload();
+    } catch (e) {
+      toast(e.message, 'bad');
+    }
+  }
+
+  return (
+    <Card
+      title="Logins"
+      actions={
+        <button type="button" className="btn sm primary" onClick={() => setAdding(true)}>
+          <Icon name="plus" size={16} /> Add login
+        </button>
+      }
+    >
+      <p className="muted small">
+        <b>Owner</b> logins can do everything, including this list. <b>Staff</b> logins can do the daily work and see
+        all records, but cannot add logins or open the admin.
+      </p>
+      {!data ? (
+        <Loading error={error} />
+      ) : (
+        <div className="rows">
+          {data.map((u) => (
+            <div key={u.id} className={`row-link static login-row ${u.is_active ? '' : 'off'}`}>
+              <span className="avatar sm">{u.username.charAt(0).toUpperCase()}</span>
+              <div className="row-main">
+                <div className="row-title">
+                  {u.username} {u.username === me && <span className="muted small">(you)</span>}{' '}
+                  <span className={`pill ${u.role === 'owner' ? 'tone-orange' : ''}`}>{ROLE_TEXT[u.role]}</span>{' '}
+                  {!u.is_active && <span className="pill bad">switched off</span>}
+                </div>
+                <div className="row-sub muted">
+                  {u.last_login ? `Last login ${fmtAt(u.last_login)}` : 'Never logged in'} ·{' '}
+                  {u.has_key ? 'has recovery key' : 'no recovery key'}
+                </div>
+              </div>
+              <div className="row-btns">
+                <button type="button" className="btn sm" onClick={() => setPwFor(u)}>
+                  Set password
+                </button>
+                {u.username !== me && (
+                  <button type="button" className={`btn sm ${u.is_active ? 'danger' : ''}`} onClick={() => toggle(u)}>
+                    {u.is_active ? 'Switch off' : 'Switch on'}
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {adding && (
+        <AddLoginModal
+          onClose={() => setAdding(false)}
+          onSaved={(u) => {
+            setAdding(false);
+            toast(`Login ${u.username} added`);
+            reload();
+          }}
+        />
+      )}
+      {pwFor && (
+        <PasswordModal
+          login={pwFor}
+          onClose={() => setPwFor(null)}
+          onSaved={() => {
+            setPwFor(null);
+            toast(`New password saved for ${pwFor.username}`);
+            reload();
+          }}
+        />
+      )}
+    </Card>
+  );
+}
+
+function AddLoginModal({ onClose, onSaved }) {
+  const [f, setF] = useState({ username: '', password: '', repeat: '', role: 'staff' });
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+
+  async function save() {
+    if (!f.username.trim()) throw new Error('Choose a username.');
+    if (/\s/.test(f.username.trim())) throw new Error('Username cannot have spaces.');
+    if (f.password.length < 6) throw new Error('Password must be at least 6 characters.');
+    if (f.password !== f.repeat) throw new Error('The two passwords are not the same.');
+    onSaved(await api('/logins', { method: 'POST', body: { username: f.username.trim(), password: f.password, role: f.role } }));
+  }
+
+  return (
+    <Modal title="Add login" onClose={onClose} onSubmit={save} submitLabel="Add login">
+      <Field label="Username *" hint="No spaces, e.g. harpreet">
+        <input autoFocus autoCapitalize="none" autoComplete="off" value={f.username} onChange={set('username')} />
+      </Field>
+      <div className="grid2">
+        <Field label="Password *" hint="At least 6 characters">
+          <input type="password" autoComplete="new-password" value={f.password} onChange={set('password')} />
+        </Field>
+        <Field label="Password again *">
+          <input type="password" autoComplete="new-password" value={f.repeat} onChange={set('repeat')} />
+        </Field>
+      </div>
+      <Field label="This login is for">
+        <Segmented
+          options={[
+            ['staff', 'Staff'],
+            ['owner', 'Owner'],
+          ]}
+          value={f.role}
+          onChange={(role) => setF({ ...f, role })}
+        />
+      </Field>
+      <p className="muted small">Tell them the password. They can make their own recovery key in Settings.</p>
+    </Modal>
+  );
+}
+
+function PasswordModal({ login, onClose, onSaved }) {
+  const [password, setPassword] = useState('');
+  const [repeat, setRepeat] = useState('');
+
+  async function save() {
+    if (password.length < 6) throw new Error('Password must be at least 6 characters.');
+    if (password !== repeat) throw new Error('The two passwords are not the same.');
+    await api(`/logins/${login.id}`, { method: 'PUT', body: { password } });
+    onSaved();
+  }
+
+  return (
+    <Modal title={`New password for ${login.username}`} onClose={onClose} onSubmit={save} submitLabel="Save password">
+      <Field label="New password" hint="At least 6 characters">
+        <input autoFocus type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+      </Field>
+      <Field label="New password again">
+        <input type="password" autoComplete="new-password" value={repeat} onChange={(e) => setRepeat(e.target.value)} />
+      </Field>
+    </Modal>
   );
 }

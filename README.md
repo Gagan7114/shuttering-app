@@ -27,11 +27,12 @@ The script:
 ./reset-password.sh # forgot a password and have no recovery key
 ```
 
-### Forgot password
+### Logins and forgot password
+- **Settings → Logins** (owner only): add logins (Owner or Staff), **Set password** for any login, switch a login off. Staff can do all daily work but can't manage logins or open the admin.
 - Once, after logging in: **Settings → Make recovery key**. Write the key down and keep it safe.
 - Forgot the password: on the login page tap **Forgot password?**, enter username, recovery key and a new password. The key is then used up and a new one is shown — write that one down.
-- No key: on the shop computer run `./reset-password.sh`.
-- Wrong keys are limited to 10 tries an hour.
+- Nobody can log in: on the **shop computer itself**, the login page shows **Create a new login** (makes an owner login; phones on the Wi-Fi don't get this button). Then fix the old login in Settings → Logins. Or run `./reset-password.sh` in a terminal.
+- Wrong recovery keys and new logins from the login page are limited to 10 tries an hour.
 
 ## How it works
 

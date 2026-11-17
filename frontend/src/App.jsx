@@ -23,14 +23,14 @@ import Settings from './pages/Settings';
 import Reports from './pages/Reports';
 
 export default function App() {
-  const [auth, setAuth] = useState({ checked: false, user: null });
+  const [auth, setAuth] = useState({ checked: false, user: null, shopComputer: false });
   const [shop, setShop] = useState({});
 
   useEffect(() => {
     onAuthLost(() => setAuth({ checked: true, user: null }));
     api('/auth/me')
       .then((d) => {
-        setAuth({ checked: true, user: d.user });
+        setAuth({ checked: true, user: d.user, shopComputer: !!d.shop_computer });
         if (d.shop) setShop(d.shop);
       })
       .catch(() => setAuth({ checked: true, user: null }));
@@ -44,6 +44,7 @@ export default function App() {
   if (!auth.user)
     return (
       <Login
+        shopComputer={auth.shopComputer}
         onLogin={(d) => {
           setAuth({ checked: true, user: d.user });
           setShop(d.shop || {});
@@ -52,7 +53,7 @@ export default function App() {
     );
 
   return (
-    <ShopContext.Provider value={{ shop, setShop }}>
+    <ShopContext.Provider value={{ shop, setShop, user: auth.user }}>
       <ToastProvider>
         <Shell user={auth.user} shop={shop} onLogout={() => setAuth({ checked: true, user: null })}>
           <Routes>

@@ -226,6 +226,35 @@ class ShutteringAppFeatureTests(FlowBase):
         res = self.api.delete(f"/api/sites/{their_site}")
         self.assertEqual(res.status_code, 204)
 
+    def test_issue_to_a_new_customer_creates_them_with_the_challan(self):
+        body = {
+            "new_customer": {"name": "  Ravi  ", "phone": "98765 43210"},
+            "new_site": "Model Town",
+            "at": "2026-11-01T10:00",
+            "lines": [self.give(self.item1, 4)],
+        }
+        res = self.api.post("/api/challans", body, format="json")
+        self.assertEqual(res.status_code, 201, res.data)
+        ravi = Customer.objects.get(pk=res.data["customer_id"])
+        self.assertEqual((ravi.name, ravi.phone), ("Ravi", "98765 43210"))
+        self.assertEqual([s.name for s in ravi.sites.all()], ["Model Town"])
+        ch = self.api.get(f"/api/challans/{res.data['id']}").data
+        self.assertEqual(ch["site_name"], "Model Town")
+
+        # too many pieces: nothing is saved, not even the customer
+        body = {**body, "new_customer": {"name": "Sita"}, "lines": [self.give(self.item1, 500)]}
+        self.assertEqual(self.api.post("/api/challans", body, format="json").status_code, 400)
+        self.assertFalse(Customer.objects.filter(name="Sita").exists())
+        # a name is needed
+        body = {**body, "new_customer": {"name": " ", "phone": "1"}, "lines": [self.give(self.item1, 1)]}
+        self.assertEqual(self.api.post("/api/challans", body, format="json").status_code, 400)
+
+    def test_new_site_name_reuses_the_customers_site(self):
+        a = self.site("GT Road")
+        self.challan_at(None, "2026-11-01T10:00", self.give(self.item1, 2), new_site="gt road")
+        acc = self.api.get(f"/api/customers/{self.cust.id}").data
+        self.assertEqual({s["id"]: s["pcs_out"] for s in acc["sites"]}, {a: 2})
+
     def test_lost_items_stop_rent_reduce_stock_and_are_billed_once(self):
         self.challan("2026-11-01T10:00", self.give(self.item1, 10))
         self.challan("2026-11-03T10:00", self.back(self.item1, 7), self.lost(self.item1, 3))
@@ -403,3 +432,61 @@ class ForgotPasswordTests(TestCase):
         codes = [self.reset("AAAA-BBBB-CCCC-DDDD").status_code for _ in range(11)]
         self.assertEqual(codes[:10], [400] * 10)
         self.assertEqual(codes[10], 429)
+
+
+class LoginManagementTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        User = get_user_model()
+        self.owner = User.objects.create_superuser("gagan", password="ownerpass1")
+        self.api = APIClient()
+        self.api.force_authenticate(self.owner)
+
+    def test_owner_adds_staff_and_sets_passwords(self):
+        res = self.api.post("/api/logins", {"username": "harpreet", "password": "staffpass1", "role": "staff"}, format="json")
+        self.assertEqual(res.status_code, 201, res.data)
+        staff_id = res.data["id"]
+        self.assertTrue(APIClient().login(username="harpreet", password="staffpass1"))
+        self.assertEqual(
+            [(r["username"], r["role"]) for r in self.api.get("/api/logins").data], [("gagan", "owner"), ("harpreet", "staff")]
+        )
+
+        self.assertEqual(self.api.put(f"/api/logins/{staff_id}", {"password": "changed123"}, format="json").status_code, 200)
+        self.assertTrue(APIClient().login(username="harpreet", password="changed123"))
+        self.assertEqual(self.api.put(f"/api/logins/{staff_id}", {"is_active": False}, format="json").status_code, 200)
+        self.assertFalse(APIClient().login(username="harpreet", password="changed123"))
+
+        # staff can't manage logins
+        staff = APIClient()
+        staff.force_authenticate(get_user_model().objects.get(pk=staff_id))
+        self.assertEqual(staff.get("/api/logins").status_code, 403)
+
+    def test_bad_input_and_no_self_lockout(self):
+        post = lambda **kw: self.api.post("/api/logins", {"password": "longenough1", **kw}, format="json")  # noqa: E731
+        self.assertEqual(post(username="GAGAN").status_code, 400)  # taken (any case)
+        self.assertEqual(post(username="two words").status_code, 400)
+        self.assertEqual(post(username="ok", password="abc").status_code, 400)
+        me = f"/api/logins/{self.owner.id}"
+        self.assertEqual(self.api.put(me, {"is_active": False}, format="json").status_code, 400)
+        self.assertEqual(self.api.put(me, {"role": "staff"}, format="json").status_code, 400)
+
+    def test_owner_changing_own_password_stays_logged_in(self):
+        client = APIClient()
+        client.login(username="gagan", password="ownerpass1")
+        res = client.put(f"/api/logins/{self.owner.id}", {"password": "brandnew1"}, format="json")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(client.get("/api/auth/me").data["user"]["username"], "gagan")
+
+    def test_create_login_from_login_page_only_on_shop_computer(self):
+        anon = APIClient()
+        self.assertTrue(anon.get("/api/auth/me").data["shop_computer"])
+        res = anon.post("/api/auth/create-login", {"username": "newowner", "password": "newowner1"}, format="json")
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertTrue(res.data["user"]["is_owner"])
+        self.assertEqual(anon.get("/api/auth/me").data["user"]["username"], "newowner")  # logged in
+
+        phone = APIClient(REMOTE_ADDR="192.168.1.20")
+        self.assertFalse(phone.get("/api/auth/me").data["shop_computer"])
+        res = phone.post("/api/auth/create-login", {"username": "intruder", "password": "intruder1"}, format="json")
+        self.assertEqual(res.status_code, 403)
+        self.assertFalse(get_user_model().objects.filter(username="intruder").exists())
